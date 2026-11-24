@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import requests as rq
 
 import db
+from generate_code import gerar_codigo_nucleo
 
 BASE_URL = os.environ.get("EVOLUTION_URL", "evolution.v4lisboatech.com.br")
 INSTANCE_NAME = os.environ.get("INSTANCE_NAME", "Gabriel Lucas - DEV")
@@ -27,6 +28,8 @@ SEND_INTERVAL = float(os.environ.get("SEND_INTERVAL", "30"))
 MESSAGES_FILE = Path(
     os.environ.get("MESSAGES_FILE", Path(__file__).with_name("mensagens.json"))
 )
+
+CODE_KEYWORD = os.environ.get("CODE_KEYWORD", "reativacao")
 
 FOLLOWUP_SCHEDULE = [
     int(item)
@@ -147,6 +150,12 @@ def _process_lead(
     fresh = db.get_by_token(lead["token"])
     if not fresh or fresh["status"] not in ("PENDENTE", "ENVIADO"):
         return 0
+
+    if not fresh["code"]:
+        db.set_lead_code(
+            fresh["token"],
+            gerar_codigo_nucleo(fresh["number"], CODE_KEYWORD),
+        )
 
     message_index = random.randrange(len(messages))
     text = messages[message_index].format(link=lead_link(fresh))

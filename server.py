@@ -1,10 +1,13 @@
+import hashlib
+import hmac
+import json
 import os
 from urllib.parse import quote_plus
 
-from flask import Flask, redirect
+from flask import Flask, redirect, request
 
 import db
-from generate_code import gerar_codigo
+from generate_code import extrair_codigo, gerar_codigo_nucleo
 
 app = Flask(__name__)
 
@@ -20,15 +23,69 @@ WHATSAPP_MESSAGE_NO_CODE = os.environ.get(
     "Olá, vim do Google e quero agendar meu momento de SPA "
     "na Drs da Beleza.",
 )
+KOMMO_WEBHOOK_SECRET = os.environ.get("KOMMO_WEBHOOK_SECRET")
+KOMMO_ACCOUNT_ID = os.environ.get("KOMMO_ACCOUNT_ID")
+
+
+def _lead_code(lead: dict) -> str:
+    core = lead.get("code")
+    if not core:
+        core = gerar_codigo_nucleo(lead["number"], CODE_KEYWORD)
+        if lead.get("token"):
+            db.set_lead_code(lead["token"], core)
+    return core
 
 
 def build_whatsapp_url(lead: dict | None) -> str:
     if lead:
-        code = gerar_codigo(lead["number"], CODE_KEYWORD)
-        message = WHATSAPP_MESSAGE.format(code=code)
+        message = WHATSAPP_MESSAGE.format(code=f"cód.+{_lead_code(lead)}")
     else:
         message = WHATSAPP_MESSAGE_NO_CODE
     return f"https://wa.me/{WHATSAPP_NUMBER}?text={quote_plus(message)}"
+
+
+def _find_code(raw: str, payload) -> str | None:
+    candidates = [raw]
+    if isinstance(payload, (dict, list)):
+        candidates.append(json.dumps(payload, ensure_ascii=False))
+    candidates.extend(request.form.values())
+
+    for candidate in candidates:
+        code = extrair_codigo(candidate)
+        if code:
+            return code
+    return None
+
+
+def _find_account_id(payload) -> str | None:
+    if isinstance(payload, dict) and payload.get("account_id"):
+        return str(payload["account_id"])
+
+    for key, value in request.form.items():
+        if key.endswith("account_id") and value:
+            return value
+    return None
+
+
+def _message_id(raw: str, payload) -> str:
+    if isinstance(payload, dict):
+        containers = [payload]
+        message = payload.get("message")
+        if isinstance(message, dict):
+            containers.append(message)
+
+        for container in containers:
+            add = container.get("add")
+            if isinstance(add, list) and add and isinstance(add[0], dict):
+                message_id = add[0].get("id")
+                if message_id:
+                    return str(message_id)
+
+    for key, value in request.form.items():
+        if key.endswith("[id]") and value:
+            return value
+
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 @app.route("/reativar/<string:token>")
@@ -44,6 +101,44 @@ def reativar(token: str):
         )
 
     return redirect(build_whatsapp_url(lead))
+
+
+@app.post("/webhooks/kommo/<secret>")
+def kommo_webhook(secret: str):
+    if not KOMMO_WEBHOOK_SECRET:
+        return {"error": "webhook nao configurado"}, 503
+    if not hmac.compare_digest(secret, KOMMO_WEBHOOK_SECRET):
+        return {"error": "forbidden"}, 403
+
+    db.init_db()
+    raw = request.get_data(as_text=True) or ""
+    payload = request.get_json(silent=True)
+
+    if KOMMO_ACCOUNT_ID:
+        account_id = _find_account_id(payload)
+        if account_id and not hmac.compare_digest(
+            account_id, KOMMO_ACCOUNT_ID
+        ):
+            return {"error": "account mismatch"}, 403
+
+    code = _find_code(raw, payload)
+    if not code:
+        return {"status": "ignored"}, 200
+
+    message_id = _message_id(raw, payload)
+    if db.webhook_seen(message_id):
+        return {"status": "duplicate"}, 200
+
+    lead = db.get_by_code(code)
+    if not lead:
+        db.record_webhook(message_id, code)
+        print(f"[webhook] codigo sem lead: {code}")
+        return {"error": "codigo invalido"}, 422
+
+    db.mark_replied(lead["token"], message_id)
+    db.record_webhook(message_id, code)
+    print(f"[webhook] lead {lead['number']} confirmado pelo codigo {code}")
+    return {"status": "ok"}, 200
 
 
 if __name__ == "__main__":

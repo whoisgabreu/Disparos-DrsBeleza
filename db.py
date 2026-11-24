@@ -21,7 +21,16 @@ CREATE TABLE IF NOT EXISTS leads (
     followup_day  INTEGER NOT NULL DEFAULT 0,
     sends_in_day  INTEGER NOT NULL DEFAULT 0,
     slot_cursor   INTEGER NOT NULL DEFAULT 0,
-    day_anchor    TEXT
+    day_anchor    TEXT,
+    code          TEXT,
+    replied_at    TEXT,
+    reply_message_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS webhook_messages (
+    message_id  TEXT PRIMARY KEY,
+    code        TEXT,
+    received_at TEXT
 );
 """
 
@@ -40,6 +49,9 @@ MIGRATIONS = {
         "ALTER TABLE leads ADD COLUMN slot_cursor INTEGER NOT NULL DEFAULT 0"
     ),
     "day_anchor": "ALTER TABLE leads ADD COLUMN day_anchor TEXT",
+    "code": "ALTER TABLE leads ADD COLUMN code TEXT",
+    "replied_at": "ALTER TABLE leads ADD COLUMN replied_at TEXT",
+    "reply_message_id": "ALTER TABLE leads ADD COLUMN reply_message_id TEXT",
 }
 
 
@@ -71,6 +83,11 @@ def init_db(today: str | None = None) -> None:
         for column, statement in MIGRATIONS.items():
             if column not in columns:
                 conn.execute(statement)
+
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_leads_code "
+            "ON leads(code) WHERE code IS NOT NULL"
+        )
 
         anchor = today or datetime.now(timezone.utc).date().isoformat()
         conn.execute(
@@ -110,6 +127,22 @@ def get_by_token(token: str) -> dict | None:
             "SELECT * FROM leads WHERE token = ?", (token,)
         ).fetchone()
     return dict(row) if row else None
+
+
+def get_by_code(code: str) -> dict | None:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM leads WHERE code = ?", (code,)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_lead_code(token: str, code: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE leads SET code = COALESCE(code, ?) WHERE token = ?",
+            (code, token),
+        )
 
 
 def initialize_lead_day(token: str, day_anchor: str) -> None:
@@ -158,6 +191,34 @@ def mark_active(token: str) -> None:
             "UPDATE leads SET status = 'ATIVO', "
             "clicked_at = COALESCE(clicked_at, ?) WHERE token = ?",
             (_now(), token),
+        )
+
+
+def mark_replied(token: str, message_id: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE leads SET status = 'ATIVO', "
+            "replied_at = COALESCE(replied_at, ?), "
+            "reply_message_id = ? WHERE token = ?",
+            (_now(), message_id, token),
+        )
+
+
+def webhook_seen(message_id: str) -> bool:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM webhook_messages WHERE message_id = ?",
+            (message_id,),
+        ).fetchone()
+    return row is not None
+
+
+def record_webhook(message_id: str, code: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO webhook_messages "
+            "(message_id, code, received_at) VALUES (?, ?, ?)",
+            (message_id, code, _now()),
         )
 
 
