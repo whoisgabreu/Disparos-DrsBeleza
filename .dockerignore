@@ -1,0 +1,11 @@
+.venv
+old
+__pycache__
+*.pyc
+leads.db
+leads.db-wal
+leads.db-shm
+dados kommo.txt
+.env
+.git
+.gitignore
