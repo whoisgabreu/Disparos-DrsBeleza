@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import json
 import os
+from datetime import datetime, timezone
 from urllib.parse import quote_plus
 
 from flask import Flask, redirect, request
@@ -25,6 +26,18 @@ WHATSAPP_MESSAGE_NO_CODE = os.environ.get(
 )
 KOMMO_WEBHOOK_SECRET = os.environ.get("KOMMO_WEBHOOK_SECRET")
 KOMMO_ACCOUNT_ID = os.environ.get("KOMMO_ACCOUNT_ID")
+
+
+def _client_ip() -> str:
+    forwarded = request.headers.get("X-Forwarded-For", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.remote_addr or "-"
+
+
+def _log(message: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    print(f"[webhook] {ts} {message}", flush=True)
 
 
 def _lead_code(lead: dict) -> str:
@@ -105,9 +118,16 @@ def reativar(token: str):
 
 @app.post("/webhooks/kommo/<secret>")
 def kommo_webhook(secret: str):
+    _log(
+        f"recebido ip={_client_ip()} "
+        f"ct={request.content_type} bytes={request.content_length}"
+    )
+
     if not KOMMO_WEBHOOK_SECRET:
+        _log("ignorado: KOMMO_WEBHOOK_SECRET nao configurado")
         return {"error": "webhook nao configurado"}, 503
     if not hmac.compare_digest(secret, KOMMO_WEBHOOK_SECRET):
+        _log(f"bloqueado: secret invalido ip={_client_ip()}")
         return {"error": "forbidden"}, 403
 
     db.init_db()
@@ -119,25 +139,30 @@ def kommo_webhook(secret: str):
         if account_id and not hmac.compare_digest(
             account_id, KOMMO_ACCOUNT_ID
         ):
+            _log("bloqueado: account_id divergente")
             return {"error": "account mismatch"}, 403
 
     code = _find_code(raw, payload)
     if not code:
+        _log("sem codigo no payload (ignorado)")
         return {"status": "ignored"}, 200
 
     message_id = _message_id(raw, payload)
     if db.webhook_seen(message_id):
+        _log(f"duplicado message_id={message_id} code={code}")
         return {"status": "duplicate"}, 200
 
     lead = db.get_by_code(code)
     if not lead:
         db.record_webhook(message_id, code)
-        print(f"[webhook] codigo sem lead: {code}")
+        _log(f"codigo invalido code={code} message_id={message_id}")
         return {"error": "codigo invalido"}, 422
 
     db.mark_replied(lead["token"], message_id)
     db.record_webhook(message_id, code)
-    print(f"[webhook] lead {lead['number']} confirmado pelo codigo {code}")
+    _log(
+        f"OK lead={lead['number']} code={code} message_id={message_id}"
+    )
     return {"status": "ok"}, 200
 
 
