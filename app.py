@@ -37,7 +37,7 @@ def main() -> None:
     else:
         print("[startup] reativar.json nao encontrado; pulando import.")
     threading.Thread(target=_scheduler_loop, daemon=True).start()
-    serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
+    serve(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
 
 
 if __name__ == "__main__":
