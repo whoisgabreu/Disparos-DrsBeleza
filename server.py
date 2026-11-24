@@ -1,6 +1,5 @@
 import hashlib
 import hmac
-import json
 import os
 from datetime import datetime, timezone
 from urllib.parse import quote_plus
@@ -57,12 +56,60 @@ def build_whatsapp_url(lead: dict | None) -> str:
     return f"https://wa.me/{WHATSAPP_NUMBER}?text={quote_plus(message)}"
 
 
-def _find_code(raw: str, payload) -> str | None:
-    candidates = [raw]
-    if isinstance(payload, (dict, list)):
-        candidates.append(json.dumps(payload, ensure_ascii=False))
-    candidates.extend(request.form.values())
+def _parse_message(raw: str, payload) -> dict:
+    fields = {
+        "account_id": None,
+        "message_id": None,
+        "text": None,
+        "contact_id": None,
+        "type": None,
+        "message_type": None,
+        "origin": None,
+    }
 
+    if isinstance(payload, dict):
+        account = payload.get("account")
+        if isinstance(account, dict) and account.get("id"):
+            fields["account_id"] = account["id"]
+        elif payload.get("account_id"):
+            fields["account_id"] = payload["account_id"]
+
+        container = payload.get("message")
+        if not isinstance(container, dict):
+            container = payload
+        add = container.get("add")
+        if isinstance(add, list) and add and isinstance(add[0], dict):
+            item = add[0]
+            fields["message_id"] = item.get("id")
+            fields["text"] = item.get("text")
+            fields["contact_id"] = item.get("contact_id")
+            fields["type"] = item.get("type")
+            fields["message_type"] = item.get("message_type")
+            fields["origin"] = item.get("origin")
+
+    prefix = "message[add][0]"
+    form = request.form
+    for key, field in (
+        ("message_id", "id"),
+        ("text", "text"),
+        ("contact_id", "contact_id"),
+        ("type", "type"),
+        ("message_type", "message_type"),
+        ("origin", "origin"),
+    ):
+        if not fields[key]:
+            fields[key] = form.get(f"{prefix}[{field}]")
+    if not fields["account_id"]:
+        fields["account_id"] = form.get("account[id]")
+
+    return {
+        key: (str(value) if value is not None else None)
+        for key, value in fields.items()
+    }
+
+
+def _find_code(raw: str, fields: dict) -> str | None:
+    candidates = [fields.get("text"), raw, *request.form.values()]
     for candidate in candidates:
         code = extrair_codigo(candidate)
         if code:
@@ -70,33 +117,13 @@ def _find_code(raw: str, payload) -> str | None:
     return None
 
 
-def _find_account_id(payload) -> str | None:
-    if isinstance(payload, dict) and payload.get("account_id"):
-        return str(payload["account_id"])
+def _message_id(raw: str, fields: dict) -> str:
+    if fields.get("message_id"):
+        return str(fields["message_id"])
 
-    for key, value in request.form.items():
-        if key.endswith("account_id") and value:
-            return value
-    return None
-
-
-def _message_id(raw: str, payload) -> str:
-    if isinstance(payload, dict):
-        containers = [payload]
-        message = payload.get("message")
-        if isinstance(message, dict):
-            containers.append(message)
-
-        for container in containers:
-            add = container.get("add")
-            if isinstance(add, list) and add and isinstance(add[0], dict):
-                message_id = add[0].get("id")
-                if message_id:
-                    return str(message_id)
-
-    for key, value in request.form.items():
-        if key.endswith("[id]") and value:
-            return value
+    request_id = request.headers.get("X-Amocrm-Requestid")
+    if request_id:
+        return request_id
 
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -133,21 +160,26 @@ def kommo_webhook(secret: str):
     db.init_db()
     raw = request.get_data(as_text=True) or ""
     payload = request.get_json(silent=True)
+    fields = _parse_message(raw, payload)
 
     if KOMMO_ACCOUNT_ID:
-        account_id = _find_account_id(payload)
+        account_id = fields.get("account_id")
         if account_id and not hmac.compare_digest(
             account_id, KOMMO_ACCOUNT_ID
         ):
             _log("bloqueado: account_id divergente")
             return {"error": "account mismatch"}, 403
 
-    code = _find_code(raw, payload)
+    if fields.get("type") and fields["type"] != "incoming":
+        _log(f"ignorado: type={fields['type']}")
+        return {"status": "ignored"}, 200
+
+    code = _find_code(raw, fields)
     if not code:
         _log("sem codigo no payload (ignorado)")
         return {"status": "ignored"}, 200
 
-    message_id = _message_id(raw, payload)
+    message_id = _message_id(raw, fields)
     if db.webhook_seen(message_id):
         _log(f"duplicado message_id={message_id} code={code}")
         return {"status": "duplicate"}, 200
@@ -161,7 +193,8 @@ def kommo_webhook(secret: str):
     db.mark_replied(lead["token"], message_id)
     db.record_webhook(message_id, code)
     _log(
-        f"OK lead={lead['number']} code={code} message_id={message_id}"
+        f"OK lead={lead['number']} code={code} message_id={message_id} "
+        f"contact_id={fields.get('contact_id')} origin={fields.get('origin')}"
     )
     return {"status": "ok"}, 200
 
