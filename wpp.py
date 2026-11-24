@@ -18,7 +18,7 @@ API_KEY = os.environ.get(
 )
 
 REDIRECT_BASE_URL = os.environ.get(
-    "REDIRECT_BASE_URL", "http://192.168.3.33:8080"
+    "REDIRECT_BASE_URL", "http://192.168.3.33:8085"
 ).rstrip("/")
 
 DELAY_MS = int(os.environ.get("DELAY_MS", "5000"))
